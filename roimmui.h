@@ -8,22 +8,26 @@ typedef struct UDim2 {
     float xs, xo, ys, yo; // x scale x offset y scale y offset
 } UDim2;
 
+#ifndef ROIMMUI_NO_VECTOR2 // for raylib 
 typedef struct Vector2 {
     float x, y;
 } Vector2;
+#endif
+
 
 typedef struct Color3 {
     float r, g, b;
 } Color3;
 
 typedef enum {
-    GuiContext, Frame, TextLabel
+    GuiContext, Frame, TextLabel, TextButton
 } RoImmuiClass;
 
 typedef struct UiInstance UiInstance;
 
 struct UiInstance {
     RoImmuiClass Class; // class
+    void* UserData;
 
     // Hierarchy stuff
     UiInstance* Parent;
@@ -34,10 +38,15 @@ struct UiInstance {
 
     // GuiContext
     Vector2 ViewportSize;
+    Vector2 MousePosition;
+    bool MouseDown;
     float (*MeasureText)(const char* text, float size);
     void (*DrawRect)(Vector2 pos, Vector2 size, Color3 color, float transparency);
     void (*DrawText)(Vector2 pos, const char* text, float size, Color3 color);
-    
+    bool PrevMouseDown;       // internal
+    UiInstance* ActiveButton; // internal: the button the mouse went down on
+    UiInstance* HoveredButton; // internal: the button under the mouse
+
     // Computed by GuiStepContext()
     Vector2 AbsolutePosition;
     Vector2 AbsoluteSize;
@@ -54,6 +63,9 @@ struct UiInstance {
     const char* Text;
     Color3 TextColor;
     float TextSize;
+    void (*MouseButton1Click)(UiInstance* self);
+    void (*MouseEnter)(UiInstance* self);
+    void (*MouseLeave)(UiInstance* self);
 };
 
 UiInstance* Instance_New(RoImmuiClass cls);
@@ -75,11 +87,14 @@ UiInstance* Instance_New(RoImmuiClass cls) {
     // defaults
     i->Class = cls;
     i->Visible = true;
-    
-    i->Size = (UDim2) { 0, 100, 0, 100 };
-    i->BackgroundColor = (Color3) { 40, 40, 48 };
-    i->TextColor = (Color3){ 255, 255, 255 };
-    i->TextSize = 18;
+    if (cls == TextLabel || cls == TextButton) {
+        i->Size = (UDim2) { 0, 200, 0, 50 };
+    } else {
+        i->Size = (UDim2) { 0, 100, 0, 100 };  
+    }
+    i->BackgroundColor = (Color3) { 255, 255, 255 };
+    i->TextColor = (Color3) { 27, 42, 53 };
+    i->TextSize = 14;
 
     return i;
 }
@@ -121,6 +136,16 @@ void Instance_Destroy(UiInstance* i) {
     while (i->FirstChild) {
         Instance_Destroy(i->FirstChild); // each child unlinks itself from i
     }
+    UiInstance* root = i;
+    while (root->Parent) {
+        root = root->Parent;
+    }
+    if (root->HoveredButton == i) {
+        root->HoveredButton = NULL;
+    }
+    if (root->ActiveButton == i) {
+        root->ActiveButton = NULL;
+    }
     SetParent(i, NULL);
     free(i);
 }
@@ -139,6 +164,30 @@ static void GuiLayout(UiInstance* parent) {
     }
 }
 
+static bool Contains(UiInstance* n, Vector2 p) {
+    return p.x >= n->AbsolutePosition.x && p.x < n->AbsolutePosition.x + n->AbsoluteSize.x && p.y >= n->AbsolutePosition.y && p.y < n->AbsolutePosition.y + n->AbsoluteSize.y;
+}
+
+static void GuiHitTest(UiInstance* gui, UiInstance* n, UiInstance** hit) {
+    if (!n->Visible) return; // hides the whole subtree
+    if (n->Class == TextButton && Contains(n, gui->MousePosition)) {
+        *hit = n;
+    }
+
+    for (UiInstance* c = n->FirstChild; c; c = c->Next) {
+        GuiHitTest(gui, c, hit);
+    }
+}
+
+static Color3 GuiBackground(UiInstance* gui, UiInstance* n) {
+    Color3 c = n->BackgroundColor;
+    if (n->Class != TextButton || n != gui->HoveredButton) {
+        return c;
+    }
+    float f = (n == gui->ActiveButton && gui->MouseDown) ? 0.75f : 0.9f; // pressed : hovered
+    return (Color3) { c.r * f, c.g * f, c.b * f };
+}
+
 static void GuiRender(UiInstance* gui, UiInstance* n) {
     switch (n->Class) {
         case GuiContext:
@@ -148,9 +197,13 @@ static void GuiRender(UiInstance* gui, UiInstance* n) {
             if (!n->Visible) return; // hides the whole subtree
             gui->DrawRect(n->AbsolutePosition, n->AbsoluteSize, n->BackgroundColor, n->BackgroundTransparency);
             break;
+        case TextButton:
+            if (!n->Visible) return; // hides the whole subtree
+            gui->DrawRect(n->AbsolutePosition, n->AbsoluteSize, GuiBackground(gui, n), n->BackgroundTransparency);
+            break;
     }
 
-    if (n->Class == TextLabel && n->Text) {
+    if ((n->Class == TextLabel || n->Class == TextButton) && n->Text) {
         float w = gui->MeasureText(n->Text, n->TextSize);
         Vector2 pos = { n->AbsolutePosition.x + (n->AbsoluteSize.x - w) * 0.5f, n->AbsolutePosition.y + (n->AbsoluteSize.y - n->TextSize) * 0.5f };
         gui->DrawText(pos, n->Text, n->TextSize, n->TextColor);
@@ -165,6 +218,39 @@ void GuiStepContext(UiInstance* gui) {
     gui->AbsolutePosition = (Vector2){ 0, 0 };
     gui->AbsoluteSize = gui->ViewportSize;
     GuiLayout(gui);
+    
+    // input: who is the mouse over?
+    UiInstance* hover = NULL;
+    GuiHitTest(gui, gui, &hover);
+
+    UiInstance* previous = gui->HoveredButton;
+    gui->HoveredButton = hover;
+    if (previous != hover) {
+        if (previous && previous->MouseLeave) {
+            previous->MouseLeave(previous);
+        }
+        hover = gui->HoveredButton;
+        if (hover && hover->MouseEnter) {
+            hover->MouseEnter(hover);
+        }
+    }
+
+    bool pressed = gui->MouseDown && !gui->PrevMouseDown;
+    bool released = !gui->MouseDown && gui->PrevMouseDown;
+    gui->PrevMouseDown = gui->MouseDown;
+
+    if (pressed) {
+        gui->ActiveButton = gui->HoveredButton;
+    }
+
+    if (released) {
+        UiInstance* a = gui->ActiveButton;
+        gui->ActiveButton = NULL;
+
+        if (a && a == gui->HoveredButton && a->MouseButton1Click) {
+            a->MouseButton1Click(a);
+        }
+    }
     GuiRender(gui, gui);
 }
 
