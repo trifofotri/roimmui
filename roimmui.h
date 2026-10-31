@@ -23,6 +23,14 @@ typedef enum {
     GuiContext, Frame, TextLabel, TextButton
 } RoImmuiClass;
 
+typedef enum {
+    TextAlignmentXCenter, TextAlignmentXLeft, TextAlignmentXRight
+} EnumTextXAlignment;
+
+typedef enum {
+    TextAlignmentYCenter, TextAlignmentYTop, TextAlignmentYBottom
+} EnumTextYAlignment;
+
 typedef struct UiInstance UiInstance;
 
 struct UiInstance {
@@ -63,6 +71,9 @@ struct UiInstance {
     const char* Text;
     Color3 TextColor;
     float TextSize;
+    bool TextScaled;
+    EnumTextXAlignment TextXAlignment;
+    EnumTextYAlignment TextYAlignment;
     void (*MouseButton1Click)(UiInstance* self);
     void (*MouseEnter)(UiInstance* self);
     void (*MouseLeave)(UiInstance* self);
@@ -188,6 +199,27 @@ static Color3 GuiBackground(UiInstance* gui, UiInstance* n) {
     return (Color3) { c.r * f, c.g * f, c.b * f };
 }
 
+static float GuiResolveTextSize(UiInstance* gui, UiInstance* n) {
+    if (!n->TextScaled || !n->Text) return n->TextSize;
+
+    int lo = 1;
+    int hi = (int) n->AbsoluteSize.y;
+    if (hi > 100) {
+        hi = 100;
+    }
+    if (hi < lo) return (float) lo;
+
+    while (lo < hi) {
+        int mid = (lo + hi + 1) / 2;
+        if (gui->MeasureText(n->Text, (float) mid) <= n->AbsoluteSize.x) {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    return (float) lo;
+}
+
 static void GuiRender(UiInstance* gui, UiInstance* n) {
     switch (n->Class) {
         case GuiContext:
@@ -204,9 +236,42 @@ static void GuiRender(UiInstance* gui, UiInstance* n) {
     }
 
     if ((n->Class == TextLabel || n->Class == TextButton) && n->Text) {
-        float w = gui->MeasureText(n->Text, n->TextSize);
-        Vector2 pos = { n->AbsolutePosition.x + (n->AbsoluteSize.x - w) * 0.5f, n->AbsolutePosition.y + (n->AbsoluteSize.y - n->TextSize) * 0.5f };
-        gui->DrawText(pos, n->Text, n->TextSize, n->TextColor);
+        float ts = GuiResolveTextSize(gui, n);
+        float w = gui->MeasureText(n->Text, ts);
+
+        float x;
+        switch (n->TextXAlignment) {
+            case TextAlignmentXLeft: {
+                x = n->AbsolutePosition.x;
+                break;
+            }
+            case TextAlignmentXRight: {
+                x = n->AbsolutePosition.x + n->AbsoluteSize.x - w;
+                break;
+            }
+            case TextAlignmentXCenter:
+            default:
+                x = n->AbsolutePosition.x + (n->AbsoluteSize.x - w) * 0.5f;
+                break;
+        }
+        
+        float y;
+        switch (n->TextYAlignment) {
+            case TextAlignmentYTop: {
+                y = n->AbsolutePosition.y;
+                break;
+            }
+            case TextAlignmentYBottom: {
+                y = n->AbsolutePosition.y + n->AbsoluteSize.y - ts;
+                break;
+            }
+            case TextAlignmentYCenter:
+            default:
+                y = n->AbsolutePosition.y + (n->AbsoluteSize.y - ts) * 0.5f;
+                break;
+        }
+        Vector2 pos = { x, y };
+        gui->DrawText(pos, n->Text, ts, n->TextColor);
     }
 
     for (UiInstance* c = n->FirstChild; c; c = c->Next) {
